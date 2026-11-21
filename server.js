@@ -3,7 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, AttachmentBuilder, Events } = require('discord.js');
 
 const bots = {
   bot: { mod: require('./etx-bot'), token: process.env.TOKEN_BOT, name: 'ETX Bot' },
@@ -13,6 +13,10 @@ const dbBot = require('./etx-bot/utils/db');
 const dbProt = require('./etx-protect/utils/db');
 const lock = require('./etx-protect/features/lock');
 const raid = require('./etx-protect/features/antiraid');
+const G = require('./etx-bot/features/giveaways');
+const PL = require('./etx-bot/features/polls');
+const { embed: bEmbed } = require('./etx-bot/utils/embed');
+const { buildWelcomeCard } = require('./etx-bot/utils/welcomeCard');
 const { parseDuration } = require('./etx-protect/utils/time');
 const { embed: pEmbed, log: pLog } = require('./etx-protect/utils/helpers');
 
@@ -40,12 +44,111 @@ const ch = (g, id) => {
 };
 const num = (v, min, max) => Math.min(max, Math.max(min, parseInt(v, 10) || 0));
 
+const dbs = { bot: dbBot, protect: dbProt };
+const ACT = { playing: 0, listening: 2, watching: 3, custom: 4, competing: 5 };
+function applyStatus(k) {
+  const c = bots[k].mod.client;
+  const s = dbs[k].guild('_global').status;
+  if (!s || !c.isReady()) return;
+  const type = ACT[s.type] ?? 0;
+  c.user.setPresence({
+    status: s.status || 'online',
+    activities: s.text ? [type === 4 ? { name: 'custom', state: s.text, type } : { name: s.text, type }] : [],
+  });
+}
+function setStatus(k, d) {
+  if (!['online', 'idle', 'dnd', 'invisible'].includes(d.status) || !(d.type in ACT)) throw new Error('Statut invalide');
+  dbs[k].guild('_global').status = { status: d.status, type: d.type, text: String(d.text || '').slice(0, 100) };
+  dbs[k].save();
+  applyStatus(k);
+}
+const globalActions = new Set(['bot.status', 'protect.status']);
+
 const actions = {
-  'bot.welcome': (g, d) => {
+  'bot.status': (_, d) => setStatus('bot', d),
+  'protect.status': (_, d) => setStatus('protect', d),
+  'bot.rr.add': async (g, d) => {
+    const role = g.roles.cache.get(d.roleId);
+    if (!role || role.managed || role.position >= g.members.me.roles.highest.position) throw new Error('Rôle inaccessible (mets le rôle du bot plus haut)');
+    const c = ch(g, d.channelId);
+    const msg = await c.messages.fetch(String(d.messageId || '').trim()).catch(() => null);
+    if (!msg) throw new Error('Message introuvable dans ce salon');
+    const m = String(d.emoji || '').match(/<a?:\w+:(\d+)>/);
+    const key = m ? m[1] : String(d.emoji || '').trim();
+    if (!key) throw new Error('Emoji requis');
+    await msg.react(key).catch(() => { throw new Error('Emoji invalide'); });
+    const s = dbBot.guild(g.id);
+    s.reactionRoles = (s.reactionRoles || []).filter((r) => !(r.messageId === msg.id && r.key === key));
+    s.reactionRoles.push({ channelId: c.id, messageId: msg.id, key, roleId: role.id });
+    dbBot.save();
+  },
+  'bot.rr.remove': (g, d) => { (dbBot.guild(g.id).reactionRoles || []).splice(Number(d.index), 1); dbBot.save(); },
+  'bot.ticket': async (g, d) => {
+    const cat = g.channels.cache.get(d.categoryId);
+    if (!cat || cat.type !== ChannelType.GuildCategory) throw new Error('Catégorie invalide');
+    if (!g.roles.cache.has(d.roleId)) throw new Error('Rôle staff invalide');
+    dbBot.guild(g.id).tickets = { categoryId: cat.id, staffRoleId: d.roleId };
+    dbBot.save();
+    const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('tickets:open').setLabel('Ouvrir un ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary));
+    await ch(g, d.channelId).send({ embeds: [bEmbed().setTitle(d.title || '🎫 Support ETX').setDescription('Une question, un problème ou une demande ?\nClique sur le bouton ci-dessous pour ouvrir un ticket privé avec le staff.')], components: [row] });
+  },
+  'bot.gw.start': async (g, d) => {
+    const ms = parseDuration(d.duration);
+    if (!ms || ms < 10000) throw new Error('Durée invalide (ex : 30m, 2h, 1d)');
+    const c = ch(g, d.channelId);
+    const gw = { channelId: c.id, prize: String(d.prize || '').slice(0, 200) || 'Surprise', winners: num(d.winners, 1, 20) || 1, host: g.client.user.id, endsAt: Date.now() + ms, entries: [], ended: false };
+    const msg = await c.send({ embeds: [G.gwEmbed(gw)], components: [G.row()] });
+    (dbBot.guild(g.id).giveaways ||= {})[msg.id] = gw;
+    dbBot.save();
+  },
+  'bot.gw.end': async (g, d) => { if (!(await G.endGiveaway(g.client, g.id, d.id))) throw new Error('Introuvable ou déjà terminé'); },
+  'bot.gw.reroll': async (g, d) => {
+    const gw = dbBot.guild(g.id).giveaways?.[d.id];
+    if (!gw?.ended) throw new Error('Giveaway non terminé');
+    const w = G.pick(gw.entries, gw.winners);
+    if (!w.length) throw new Error('Aucun participant');
+    await ch(g, gw.channelId).send(`🔁 Nouveau(x) gagnant(s) pour **${gw.prize}** : ${w.map((x) => `<@${x}>`).join(', ')} 🎉`);
+  },
+  'bot.poll.create': async (g, d) => {
+    const options = String(d.options || '').split(/\n|\|/).map((s) => s.trim()).filter(Boolean);
+    if (options.length < 2 || options.length > 5) throw new Error('2 à 5 choix (un par ligne)');
+    const c = ch(g, d.channelId);
+    const p = { question: String(d.question || '').slice(0, 250), options, votes: {}, author: g.client.user.id, ended: false, channelId: c.id };
+    const msg = await c.send({ embeds: [PL.pollEmbed(p)], components: [PL.buttons(p)] });
+    (dbBot.guild(g.id).polls ||= {})[msg.id] = p;
+    dbBot.save();
+  },
+  'bot.poll.end': async (g, d) => {
+    const p = dbBot.guild(g.id).polls?.[d.id];
+    if (!p || p.ended) throw new Error('Introuvable ou déjà terminé');
+    p.ended = true;
+    dbBot.save();
+    const msg = await ch(g, p.channelId).messages.fetch(d.id).catch(() => null);
+    await msg?.edit({ embeds: [PL.pollEmbed(p)], components: [PL.buttons(p, true)] });
+  },
+  'bot.reward.add': (g, d) => {
+    if (!g.roles.cache.has(d.roleId)) throw new Error('Rôle invalide');
+    (dbBot.guild(g.id).levelRewards ||= {})[num(d.level, 1, 1000)] = d.roleId;
+    dbBot.save();
+  },
+  'bot.reward.remove': (g, d) => { delete dbBot.guild(g.id).levelRewards?.[d.level]; dbBot.save(); },
+  'protect.clear': async (g, d) => {
+    const c = ch(g, d.channelId);
+    let msgs = await c.messages.fetch({ limit: 100 });
+    if (d.userId) msgs = msgs.filter((m) => m.author.id === String(d.userId).trim());
+    const del = await c.bulkDelete([...msgs.values()].slice(0, num(d.count, 1, 100) || 1), true);
+    return { msg: `🧹 ${del.size} message(s) supprimé(s)` };
+  },
+  'protect.slowmode': async (g, d) => { await ch(g, d.channelId).setRateLimitPerUser(num(d.seconds, 0, 21600)); },
+  'bot.welcome': async (g, d) => {
     const s = dbBot.guild(g.id);
     s.welcome = { ...s.welcome, channelId: ch(g, d.channelId).id };
     if (d.text) s.welcome.text = String(d.text).slice(0, 40);
     dbBot.save();
+    if (d.v === 'test') {
+      const png = await buildWelcomeCard(g.members.me, s.welcome.text || 'Bienvenue sur ETX');
+      await ch(g, d.channelId).send({ content: 'Aperçu de la carte de bienvenue :', files: [new AttachmentBuilder(png, { name: 'welcome.png' })] });
+    }
   },
   'bot.message': (g, d) => ch(g, d.channelId).send({ content: String(d.content || '').slice(0, 2000) || '\u200b' }),
   'bot.embed': (g, d) => {
@@ -74,8 +177,8 @@ const actions = {
     (s.notifs || []).splice(Number(d.index), 1);
     dbBot.save();
   },
-  'protect.lockall': async (g) => ({ count: await lock.lockAll(g, 'Dashboard') }),
-  'protect.unlockall': async (g) => ({ count: await lock.unlockAll(g, 'Dashboard') }),
+  'protect.lockall': async (g) => ({ msg: `🔒 ${await lock.lockAll(g, 'Dashboard')} salon(s) verrouillé(s)` }),
+  'protect.unlockall': async (g) => ({ msg: `🔓 ${await lock.unlockAll(g, 'Dashboard')} salon(s) déverrouillé(s)` }),
   'protect.lock': async (g, d) => { const c = ch(g, d.channelId); if (d.v === 'off') await lock.unlockChannel(c, 'Dashboard'); else await lock.lockChannel(c, 'Dashboard'); },
   'protect.modlog': (g, d) => { dbProt.guild(g.id).logChannel = ch(g, d.channelId).id; dbProt.save(); },
   'protect.antiraid': (g, d) => {
@@ -94,7 +197,15 @@ const actions = {
     const id = String(d.userId || '').trim();
     if (!/^\d{17,20}$/.test(id)) throw new Error('ID utilisateur invalide');
     const why = `Dashboard : ${String(d.reason || 'Aucune raison').slice(0, 400)}`;
-    if (d.type === 'unban') await g.members.unban(id, why);
+    const sw = dbProt.guild(g.id);
+    sw.warns ||= {};
+    if (d.type === 'warn') { (sw.warns[id] ||= []).push({ mod: g.client.user.id, reason: String(d.reason || 'Aucune raison').slice(0, 400), date: Date.now() }); dbProt.save(); }
+    else if (d.type === 'unwarn') {
+      const l = sw.warns[id] || [], n = parseInt(d.duration, 10) - 1;
+      if (!l[n]) throw new Error('N° de warn invalide (mets-le dans le champ « Durée / N° »)');
+      l.splice(n, 1); dbProt.save();
+    } else if (d.type === 'clearwarns') { delete sw.warns[id]; dbProt.save(); }
+    else if (d.type === 'unban') await g.members.unban(id, why);
     else if (d.type === 'ban') await g.members.ban(id, { reason: why });
     else {
       const m = await g.members.fetch(id).catch(() => null);
@@ -168,17 +279,30 @@ const server = http.createServer(async (req, res) => {
       const g = guildOf(k, url.searchParams.get('id'));
       const channels = [...g.channels.cache.values()].filter((c) => c.isTextBased() && !c.isThread() && !c.isVoiceBased())
         .sort((a, b) => a.rawPosition - b.rawPosition).map((c) => ({ id: c.id, name: c.name }));
-      const s = (k === 'bot' ? dbBot : dbProt).guild(g.id);
+      const roles = [...g.roles.cache.values()].filter((r) => !r.managed && r.id !== g.id).sort((x, y) => y.position - x.position).map((r) => ({ id: r.id, name: r.name }));
+      const categories = [...g.channels.cache.values()].filter((c) => c.type === ChannelType.GuildCategory).map((c) => ({ id: c.id, name: c.name }));
+      const s = dbs[k].guild(g.id);
+      const status = dbs[k].guild('_global').status || {};
+      const uname = (id) => g.members.cache.get(id)?.user.username || id;
       const data = k === 'bot'
-        ? { welcome: s.welcome || {}, levelCfg: s.levelCfg || {}, notifs: s.notifs || [] }
-        : { antiraid: raid.cfg(g.id), logChannel: s.logChannel || null, locked: Object.keys(s.locks || {}).length };
-      return json(res, 200, { channels, ...data });
+        ? {
+          welcome: s.welcome || {}, levelCfg: s.levelCfg || {}, notifs: s.notifs || [], reactionRoles: s.reactionRoles || [],
+          tickets: s.tickets || null, rewards: s.levelRewards || {},
+          top: Object.entries(s.levels || {}).sort((x, y) => y[1].total - x[1].total).slice(0, 10).map(([id, u]) => ({ name: uname(id), level: u.level, total: u.total })),
+          giveaways: Object.entries(s.giveaways || {}).slice(-8).reverse().map(([id, x]) => ({ id, prize: x.prize, endsAt: x.endsAt, ended: x.ended, entries: x.entries.length })),
+          polls: Object.entries(s.polls || {}).filter(([, p]) => p.channelId).slice(-8).reverse().map(([id, p]) => ({ id, question: p.question, ended: p.ended, votes: Object.keys(p.votes).length })),
+        }
+        : {
+          antiraid: raid.cfg(g.id), logChannel: s.logChannel || null, locked: Object.keys(s.locks || {}).length,
+          warns: Object.entries(s.warns || {}).filter(([, l]) => l.length).map(([id, l]) => ({ id, name: uname(id), list: l.map((w) => w.reason) })),
+        };
+      return json(res, 200, { channels, roles, categories, status, ...data });
     }
     if (url.pathname === '/api/action' && req.method === 'POST') {
       if (!(req.headers['content-type'] || '').includes('application/json')) return json(res, 415, { error: 'JSON requis' });
       const { bot, guildId, action, data } = await readBody(req);
       if (!actions[action] || !action.startsWith(`${bot}.`)) return json(res, 400, { error: 'Action inconnue' });
-      const result = await actions[action](guildOf(bot, guildId), data || {});
+      const result = await actions[action](globalActions.has(action) ? null : guildOf(bot, guildId), data || {});
       return json(res, 200, { ok: true, ...(result && Object.getPrototypeOf(result) === Object.prototype ? result : {}) });
     }
     return json(res, 404, { error: 'Not found' });
@@ -189,6 +313,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(process.env.PORT || 3000, '0.0.0.0', () => console.log(`🌐 Dashboard sur le port ${process.env.PORT || 3000}`));
 
+for (const k of Object.keys(bots)) bots[k].mod.client.once(Events.ClientReady, () => applyStatus(k));
 (async () => {
   for (const [k, b] of Object.entries(bots)) {
     if (!b.token) { console.warn(`⚠️ Token manquant pour ${b.name} (TOKEN_${k.toUpperCase()})`); continue; }
