@@ -34,6 +34,8 @@ const buttons = (p, disabled = false) => new ActionRowBuilder().addComponents(
 
 module.exports = {
   name: 'polls',
+  pollEmbed,
+  buttons,
   commands: [command],
   async execute(i) {
     const g = db.guild(i.guildId);
@@ -42,7 +44,7 @@ module.exports = {
     if (i.options.getSubcommand() === 'create') {
       const options = i.options.getString('options').split('|').map((s) => s.trim()).filter(Boolean);
       if (options.length < 2 || options.length > 5) return i.reply({ content: '❌ Il faut entre 2 et 5 choix, séparés par `|`.', flags: eph });
-      const p = { question: i.options.getString('question'), options, votes: {}, author: i.user.id, ended: false };
+      const p = { question: i.options.getString('question'), options, votes: {}, author: i.user.id, ended: false, channelId: i.channelId };
       const msg = await i.channel.send({ embeds: [pollEmbed(p)], components: [buttons(p)] });
       g.polls[msg.id] = p;
       db.save();
