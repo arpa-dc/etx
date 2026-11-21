@@ -53,6 +53,10 @@ async function endGiveaway(client, guildId, messageId) {
 
 module.exports = {
   name: 'giveaways',
+  gwEmbed,
+  row,
+  endGiveaway,
+  pick,
   commands: [command],
   async execute(i) {
     const g = db.guild(i.guildId);
