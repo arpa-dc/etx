@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ETX Dashboard</title>
+<style>
+:root{--bg:#030b2e;--panel:#071347;--line:#16307f;--blue:#1e5bff;--blue2:#2a8bff;--txt:#fff;--mut:#9db6ff;--ok:#38d996;--err:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;font:15px system-ui,sans-serif;background:linear-gradient(135deg,#030b2e,#0a2fd6 220%) fixed;color:var(--txt);min-height:100vh}
+button,input,select,textarea{font:inherit;color:var(--txt)}
+.hidden{display:none!important}
+header{display:flex;align-items:center;gap:16px;padding:14px 24px;background:rgba(7,19,71,.9);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.logo{font-weight:800;font-size:20px;letter-spacing:1px}.logo b{color:var(--blue2)}
+nav{display:flex;gap:6px;flex:1;flex-wrap:wrap}
+nav button{background:none;border:0;padding:8px 14px;border-radius:8px;cursor:pointer;color:var(--mut)}
+nav button.on{background:var(--blue);color:#fff}
+main{max-width:1000px;margin:0 auto;padding:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+.card h3{margin:0 0 12px;font-size:16px}
+.card h3 small{color:var(--mut);font-weight:400}
+label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+input,select,textarea{width:100%;background:#030b2e;border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+input[type=checkbox]{width:auto;margin-right:8px}
+.chk{display:flex;align-items:center;margin-top:10px;color:#fff;font-size:14px}
+textarea{min-height:80px;resize:vertical}
+.btn{background:var(--blue);border:0;border-radius:8px;padding:9px 16px;cursor:pointer;margin-top:14px;margin-right:6px;font-weight:600}
+.btn:hover{background:var(--blue2)}.btn.w{background:#fff;color:#0a2fd6}.btn.r{background:#c93a3a}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--err);margin-right:8px}.dot.on{background:var(--ok)}
+.mut{color:var(--mut)}.item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.item .btn{margin:0;padding:4px 10px}
+#login{max-width:360px;margin:15vh auto;text-align:center}
+#toast{position:fixed;bottom:20px;right:20px;background:#fff;color:#0a2fd6;padding:12px 18px;border-radius:10px;font-weight:600;box-shadow:0 6px 20px #0006}
+#toast.err{background:var(--err);color:#fff}
+</style>
+</head>
+<body>
+<div id="login" class="card">
+  <div class="logo" style="font-size:28px">ETX <b>Dashboard</b></div>
+  <p class="mut">Accès protégé</p>
+  <form id="lf"><input type="password" id="pw" placeholder="Mot de passe" autofocus><button class="btn" style="width:100%">Entrer</button></form>
+  <p id="lerr" style="color:var(--err)"></p>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <div class="logo">ETX <b>Dashboard</b></div>
+    <nav>
+      <button data-p="home" class="on">Accueil</button>
+      <button data-p="bot">ETX Bot</button>
+      <button data-p="protect">ETX Protect</button>
+    </nav>
+    <select id="guild" style="width:220px"></select>
+    <button class="btn r" id="out" style="margin:0">Déconnexion</button>
+  </header>
+  <main id="view"></main>
+</div>
+<div id="toast" class="hidden"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let page = 'home', gid = null, status = {}, info = null;
+
+function toast(msg, err) {
+  const t = $('#toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.classList.remove('hidden');
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add('hidden'), 3500);
+}
+async function api(url, body) {
+  const r = await fetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && url !== '/api/login') { showLogin(); throw new Error('Session expirée'); }
+  if (!r.ok) throw new Error(j.error || 'Erreur');
+  return j;
+}
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const dur = (ms) => { const m = Math.floor(ms / 60000); return m > 1440 ? `${Math.floor(m / 1440)}j ${Math.floor(m % 1440 / 60)}h` : `${Math.floor(m / 60)}h ${m % 60}m`; };
+
+function showLogin() { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); }
+$('#lf').onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api('/api/login', { password: $('#pw').value }); $('#pw').value = ''; boot(); }
+  catch (err) { $('#lerr').textContent = err.message; }
+};
+$('#out').onclick = async () => { await api('/api/logout', {}); showLogin(); };
+
+async function boot() {
+  try { status = await api('/api/status'); } catch { return showLogin(); }
+  $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
+  const all = new Map();
+  Object.values(status).forEach((b) => b.guilds.forEach((g) => all.set(g.id, g.name)));
+  $('#guild').innerHTML = [...all].map(([id, n]) => `<option value="${id}">${esc(n)}</option>`).join('');
+  if (!gid || !all.has(gid)) gid = $('#guild').value;
+  $('#guild').value = gid;
+  render();
+}
+$('#guild').onchange = () => { gid = $('#guild').value; render(); };
+document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
+  page = b.dataset.p;
+  document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+  render();
+});
+
+const opts = (list, sel, empty) => (empty ? `<option value="">${empty}</option>` : '') +
+  list.map((c) => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>#${esc(c.name)}</option>`).join('');
+
+async function render() {
+  const v = $('#view');
+  if (page === 'home') {
+    status = await api('/api/status').catch(() => status);
+    v.innerHTML = '<div class="grid">' + Object.values(status).map((b) => `
+      <div class="card"><h3><span class="dot ${b.online ? 'on' : ''}"></span>${esc(b.name)} <small>${esc(b.tag || 'hors ligne')}</small></h3>
+      <p class="mut">Ping : ${b.online ? b.ping + ' ms' : '—'} · En ligne depuis : ${b.online ? dur(b.uptime) : '—'}</p>
+      ${b.guilds.map((g) => `<div class="item"><span>${esc(g.name)}</span><span class="mut">${g.members} membres</span></div>`).join('') || '<p class="mut">Aucun serveur.</p>'}</div>`).join('') + '</div>';
+    return;
+  }
+  if (!gid) { v.innerHTML = '<p class="mut">Le bot n\'est sur aucun serveur.</p>'; return; }
+  try { info = await api(`/api/guild?bot=${page}&id=${gid}`); }
+  catch (e) { v.innerHTML = `<div class="card">⚠️ ${esc(e.message)}</div>`; return; }
+  v.innerHTML = page === 'bot' ? botPage(info) : protectPage(info);
+}
+
+function botPage(i) {
+  const C = i.channels, w = i.welcome, l = i.levelCfg;
+  return `<div class="grid">
+  <form class="card" data-a="bot.welcome"><h3>👋 Carte de bienvenue</h3>
+    <label>Salon</label><select name="channelId">${opts(C, w.channelId)}</select>
+    <label>Texte sous le pseudo</label><input name="text" maxlength="40" value="${esc(w.text || 'Bienvenue sur ETX')}">
+    <button class="btn">Enregistrer</button></form>
+  <form class="card" data-a="bot.levels"><h3>📈 Niveaux</h3>
+    <label class="chk"><input type="checkbox" name="enabled" ${l.disabled ? '' : 'checked'}> Système activé</label>
+    <label>Salon des annonces (vide = salon du message)</label><select name="channelId">${opts(C, l.channelId, '—')}</select>
+    <button class="btn">Enregistrer</button></form>
+  <form class="card" data-a="bot.message"><h3>💬 Envoyer un message</h3>
+    <label>Salon</label><select name="channelId">${opts(C)}</select>
+    <label>Contenu</label><textarea name="content" maxlength="2000" required></textarea>
+    <button class="btn">Envoyer</button></form>
+  <form class="card" data-a="bot.embed"><h3>🧩 Envoyer un embed</h3>
+    <label>Salon</label><select name="channelId">${opts(C)}</select>
+    <label>Titre</label><input name="title" maxlength="256">
+    <label>Description</label><textarea name="description" maxlength="4000"></textarea>
+    <div class="row"><div><label>Couleur (hexa)</label><input name="color" placeholder="1E5BFF"></div><div><label>Image (URL)</label><input name="image"></div></div>
+    <button class="btn">Envoyer</button></form>
+  <div class="card" style="grid-column:1/-1"><h3>🔔 Notifications <small>Twitch · YouTube · TikTok · Twitter</small></h3>
+    ${i.notifs.map((n, k) => `<div class="item"><span><b>${esc(n.platform)}</b> — ${esc(n.account)} → #${esc((C.find((c) => c.id === n.channelId) || {}).name || '?')}</span>
+      <button class="btn r" data-a="bot.notif.remove" data-d='${JSON.stringify({ index: k })}'>Supprimer</button></div>`).join('') || '<p class="mut">Aucune notification.</p>'}
+    <form data-a="bot.notif.add"><div class="row"><div><label>Plateforme</label><select name="platform"><option>twitch</option><option>youtube</option><option>tiktok</option><option>twitter</option></select></div>
+      <div><label>Compte (YouTube : ID UC…)</label><input name="account" required></div>
+      <div><label>Salon</label><select name="channelId">${opts(C)}</select></div></div>
+      <label>Message ({account} {title} {url})</label><input name="message" maxlength="500">
+      <button class="btn">Ajouter</button></form></div></div>`;
+}
+
+function protectPage(i) {
+  const C = i.channels, a = i.antiraid;
+  return `<div class="grid">
+  <div class="card"><h3>🔒 Verrouillage <small>${i.locked} salon(s) verrouillé(s)</small></h3>
+    <button class="btn r" data-a="protect.lockall" data-confirm="Verrouiller TOUS les salons ?">Verrouiller tout</button>
+    <button class="btn w" data-a="protect.unlockall" data-confirm="Déverrouiller tous les salons ?">Déverrouiller tout</button>
+    <form data-a="protect.lock"><label>Un salon précis</label><select name="channelId">${opts(C)}</select>
+      <button class="btn r" data-v="on">Lock</button><button class="btn w" data-v="off">Unlock</button></form></div>
+  <form class="card" data-a="protect.modlog"><h3>📜 Salon de logs</h3>
+    <label>Salon</label><select name="channelId">${opts(C, i.logChannel)}</select><button class="btn">Enregistrer</button></form>
+  <form class="card" data-a="protect.antiraid" style="grid-column:1/-1"><h3>🛡️ Anti-raid</h3>
+    <label class="chk"><input type="checkbox" name="enabled" ${a.enabled ? 'checked' : ''}> Activé</label>
+    <div class="row"><div><label>Joins max</label><input type="number" name="joinLimit" value="${a.joinLimit}"></div>
+      <div><label>Fenêtre (s)</label><input type="number" name="joinWindow" value="${a.joinWindow}"></div>
+      <div><label>Sanction</label><select name="action">${['kick', 'ban', 'timeout'].map((x) => `<option ${a.action === x ? 'selected' : ''}>${x}</option>`).join('')}</select></div></div>
+    <div class="row"><div><label>Âge min. compte (jours)</label><input type="number" name="minAge" value="${a.minAge}"></div>
+      <div><label>Durée raid (min)</label><input type="number" name="raidMinutes" value="${a.raidMinutes}"></div>
+      <div><label>Mentions max (0 = off)</label><input type="number" name="mentionLimit" value="${a.mentionLimit}"></div></div>
+    <label class="chk"><input type="checkbox" name="autoLock" ${a.autoLock ? 'checked' : ''}> Verrouiller les salons pendant un raid</label>
+    <label class="chk"><input type="checkbox" name="antiInvite" ${a.antiInvite ? 'checked' : ''}> Bloquer les invitations Discord</label>
+    <button class="btn">Enregistrer</button></form>
+  <form class="card" data-a="protect.raidmode"><h3>🚨 Raid mode ${Date.now() < a.raidUntil ? '<small style="color:var(--err)">ACTIF</small>' : ''}</h3>
+    <label>Durée (minutes)</label><input type="number" name="minutes" value="${a.raidMinutes}">
+    <button class="btn r" data-v="on">Activer</button><button class="btn w" data-v="off">Désactiver</button></form>
+  <form class="card" data-a="protect.mod"><h3>🔨 Modération</h3>
+    <div class="row"><div><label>Action</label><select name="type"><option>kick</option><option>ban</option><option>unban</option><option>timeout</option><option>untimeout</option></select></div>
+      <div><label>ID utilisateur</label><input name="userId" required></div></div>
+    <div class="row"><div><label>Durée (timeout)</label><input name="duration" placeholder="10m, 2h, 1d"></div><div><label>Raison</label><input name="reason"></div></div>
+    <button class="btn">Exécuter</button></form></div>`;
+}
+
+async function run(action, data, el) {
+  if (el?.dataset.confirm && !confirm(el.dataset.confirm)) return;
+  try {
+    const r = await api('/api/action', { bot: action.split('.')[0], guildId: gid, action, data });
+    toast(r.count != null ? `✅ ${r.count} salon(s) modifié(s)` : '✅ Fait !');
+    if (!action.endsWith('.message') && !action.endsWith('.embed') && !action.endsWith('.mod')) render();
+  } catch (e) { toast(e.message, true); }
+}
+document.addEventListener('submit', (e) => {
+  const f = e.target.closest('form[data-a]'); if (!f) return;
+  e.preventDefault();
+  const d = {};
+  for (const el of f.elements) {
+    if (!el.name) continue;
+    d[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  if (e.submitter?.dataset.v) d.v = e.submitter.dataset.v;
+  run(f.dataset.a, d, e.submitter);
+});
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-a]');
+  if (b) run(b.dataset.a, b.dataset.d ? JSON.parse(b.dataset.d) : {}, b);
+});
+boot();
+</script>
+</body>
+</html>
