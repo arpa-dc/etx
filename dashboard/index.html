@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ETX Dashboard</title>
+<style>
+:root{--bg:#030b2e;--panel:#071347;--line:#16307f;--blue:#1e5bff;--blue2:#2a8bff;--txt:#fff;--mut:#9db6ff;--ok:#38d996;--err:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;font:15px system-ui,sans-serif;background:linear-gradient(135deg,#030b2e,#0a2fd6 220%) fixed;color:var(--txt);min-height:100vh}
+button,input,select,textarea{font:inherit;color:var(--txt)}
+.hidden{display:none!important}
+header{display:flex;align-items:center;gap:16px;padding:14px 24px;background:rgba(7,19,71,.9);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.logo{font-weight:800;font-size:20px;letter-spacing:1px}.logo b{color:var(--blue2)}
+nav{display:flex;gap:6px;flex:1;flex-wrap:wrap}
+nav button{background:none;border:0;padding:8px 14px;border-radius:8px;cursor:pointer;color:var(--mut)}
+nav button.on{background:var(--blue);color:#fff}
+main{max-width:1100px;margin:0 auto;padding:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px}
+.card h3{margin:0 0 12px;font-size:16px}
+.card h3 small{color:var(--mut);font-weight:400}
+label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+input,select,textarea{width:100%;background:#030b2e;border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+input[type=checkbox]{width:auto;margin-right:8px}
+.chk{display:flex;align-items:center;margin-top:10px;color:#fff;font-size:14px}
+textarea{min-height:80px;resize:vertical}
+.btn{background:var(--blue);border:0;border-radius:8px;padding:9px 16px;cursor:pointer;margin-top:14px;margin-right:6px;font-weight:600}
+.btn:hover{background:var(--blue2)}.btn.w{background:#fff;color:#0a2fd6}.btn.r{background:#c93a3a}
+.row{display:flex;gap:10px}.row>*{flex:1}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--err);margin-right:8px}.dot.on{background:var(--ok)}
+.mut{color:var(--mut)}.item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.item .btn{margin:0;padding:4px 10px}
+#login{max-width:360px;margin:15vh auto;text-align:center}
+#toast{position:fixed;bottom:20px;right:20px;background:#fff;color:#0a2fd6;padding:12px 18px;border-radius:10px;font-weight:600;box-shadow:0 6px 20px #0006}
+#toast.err{background:var(--err);color:#fff}
+</style>
+</head>
+<body>
+<div id="login" class="card">
+  <div class="logo" style="font-size:28px">ETX <b>Dashboard</b></div>
+  <p class="mut">Accès protégé</p>
+  <form id="lf"><input type="password" id="pw" placeholder="Mot de passe" autofocus><button class="btn" style="width:100%">Entrer</button></form>
+  <p id="lerr" style="color:var(--err)"></p>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <div class="logo">ETX <b>Dashboard</b></div>
+    <nav>
+      <button data-p="home" class="on">Accueil</button>
+      <button data-p="bot">ETX Bot</button>
+      <button data-p="protect">ETX Protect</button>
+    </nav>
+    <select id="guild" style="width:220px"></select>
+    <button class="btn r" id="out" style="margin:0">Déconnexion</button>
+  </header>
+  <main id="view"></main>
+</div>
+<div id="toast" class="hidden"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let page = 'home', gid = null, status = {}, info = null;
+
+function toast(msg, err) {
+  const t = $('#toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.classList.remove('hidden');
+  clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.add('hidden'), 3500);
+}
+async function api(url, body) {
+  const r = await fetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && url !== '/api/login') { showLogin(); throw new Error('Session expirée'); }
+  if (!r.ok) throw new Error(j.error || 'Erreur');
+  return j;
+}
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const dur = (ms) => { const m = Math.floor(ms / 60000); return m > 1440 ? `${Math.floor(m / 1440)}j ${Math.floor(m % 1440 / 60)}h` : `${Math.floor(m / 60)}h ${m % 60}m`; };
+
+function showLogin() { $('#app').classList.add('hidden'); $('#login').classList.remove('hidden'); }
+$('#lf').onsubmit = async (e) => {
+  e.preventDefault();
+  try { await api('/api/login', { password: $('#pw').value }); $('#pw').value = ''; boot(); }
+  catch (err) { $('#lerr').textContent = err.message; }
+};
+$('#out').onclick = async () => { await api('/api/logout', {}); showLogin(); };
+
+async function boot() {
+  try { status = await api('/api/status'); } catch { return showLogin(); }
+  $('#login').classList.add('hidden'); $('#app').classList.remove('hidden');
+  const all = new Map();
+  Object.values(status).forEach((b) => b.guilds.forEach((g) => all.set(g.id, g.name)));
+  $('#guild').innerHTML = [...all].map(([id, n]) => `<option value="${id}">${esc(n)}</option>`).join('');
+  if (!gid || !all.has(gid)) gid = $('#guild').value;
+  $('#guild').value = gid;
+  render();
+}
+$('#guild').onchange = () => { gid = $('#guild').value; render(); };
+document.querySelectorAll('nav button').forEach((b) => b.onclick = () => {
+  page = b.dataset.p;
+  document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+  render();
+});
+
+const opts = (list, sel, empty) => (empty ? `<option value="">${empty}</option>` : '') +
+  list.map((c) => `<option value="${c.id}" ${c.id === sel ? 'selected' : ''}>#${esc(c.name)}</option>`).join('');
+
+async function render() {
+  const v = $('#view');
+  if (page === 'home') {
+    status = await api('/api/status').catch(() => status);
+    v.innerHTML = '<div class="grid">' + Object.values(status).map((b) => `
+      <div class="card"><h3><span class="dot ${b.online ? 'on' : ''}"></span>${esc(b.name)} <small>${esc(b.tag || 'hors ligne')}</small></h3>
+      <p class="mut">Ping : ${b.online ? b.ping + ' ms' : '—'} · En ligne depuis : ${b.online ? dur(b.uptime) : '—'}</p>
+      ${b.guilds.map((g) => `<div class="item"><span>${esc(g.name)}</span><span class="mut">${g.members} membres</span></div>`).join('') || '<p class="mut">Aucun serveur.</p>'}</div>`).join('') + '</div>';
+    return;
+  }
+  if (!gid) { v.innerHTML = '<p class="mut">Le bot n\'est sur aucun serveur.</p>'; return; }
+  try { info = await api(`/api/guild?bot=${page}&id=${gid}`); }
+  catch (e) { v.innerHTML = `<div class="card">⚠️ ${esc(e.message)}</div>`; return; }
+  v.innerHTML = page === 'bot' ? botPage(info) : protectPage(info);
+}
+
+// ---------- petits générateurs de formulaires ----------
+const L = (l, h) => `<label>${l}</label>${h}`;
+const I = (n, l, a = '') => L(l, `<input name="${n}" ${a}>`);
+const S = (n, l, o) => L(l, `<select name="${n}">${o}</select>`);
+const T = (n, l, a = '') => L(l, `<textarea name="${n}" ${a}></textarea>`);
+const CK = (n, l, on) => `<label class="chk"><input type="checkbox" name="${n}" ${on ? 'checked' : ''}> ${l}</label>`;
+const FC = (a, t, body, btn = 'Enregistrer', wide) => `<form class="card" ${wide ? 'style="grid-column:1/-1"' : ''} data-a="${a}"><h3>${t}</h3>${body}<button class="btn">${btn}</button></form>`;
+const BTN = (a, txt, d, cls = '', conf) => `<button class="btn ${cls}" data-a="${a}" data-d="${esc(JSON.stringify(d || {}))}" ${conf ? `data-confirm="${conf}"` : ''}>${txt}</button>`;
+const CARD = (t, body, wide) => `<div class="card" ${wide ? 'style="grid-column:1/-1"' : ''}><h3>${t}</h3>${body}</div>`;
+const ITEM = (txt, btn) => `<div class="item"><span>${txt}</span>${btn || ''}</div>`;
+const chO = (C, sel, empty) => opts(C, sel, empty);
+const roO = (R) => R.map((r) => `<option value="${r.id}">@${esc(r.name)}</option>`).join('');
+const rn = (R, id) => (R.find((r) => r.id === id) || {}).name || '?';
+const cn = (C, id) => (C.find((c) => c.id === id) || {}).name || '?';
+
+function statusCard(k, s) {
+  const st = { online: '🟢 En ligne', idle: '🌙 Inactif', dnd: '⛔ Ne pas déranger', invisible: '⚫ Invisible' };
+  const ty = [['playing', 'Joue à'], ['listening', 'Écoute'], ['watching', 'Regarde'], ['competing', 'Participe à'], ['custom', 'Statut personnalisé']];
+  return FC(`${k}.status`, '🟢 Statut du bot',
+    S('status', 'Présence', Object.entries(st).map(([v, n]) => `<option value="${v}" ${s.status === v ? 'selected' : ''}>${n}</option>`).join('')) +
+    S('type', 'Activité', ty.map(([v, n]) => `<option value="${v}" ${s.type === v ? 'selected' : ''}>${n}</option>`).join('')) +
+    I('text', 'Texte (ex : /help | ETX)', `maxlength="100" value="${esc(s.text || '')}"`));
+}
+
+function botPage(i) {
+  const { channels: C, roles: R, categories: K, welcome: w, levelCfg: l } = i;
+  const date = (t) => `<t>${new Date(t).toLocaleString('fr-FR')}</t>`.replace(/<\/?t>/g, '');
+  return `<div class="grid">
+  ${statusCard('bot', i.status)}
+  ${FC('bot.welcome', '👋 Carte de bienvenue', S('channelId', 'Salon', chO(C, w.channelId)) + I('text', 'Texte sous le pseudo', `maxlength="40" value="${esc(w.text || 'Bienvenue sur ETX')}"`) + `<button class="btn w" data-v="test">Enregistrer + aperçu</button>`)}
+  ${FC('bot.message', '💬 Créer un message', S('channelId', 'Salon', chO(C)) + T('content', 'Contenu', 'maxlength="2000" required'), 'Envoyer')}
+  ${FC('bot.embed', '🧩 Créer un embed', S('channelId', 'Salon', chO(C)) + I('title', 'Titre', 'maxlength="256"') + T('description', 'Description', 'maxlength="4000"') +
+    `<div class="row"><div>${I('color', 'Couleur (hexa)', 'placeholder="1E5BFF"')}</div><div>${I('image', 'Image (URL)')}</div></div>`, 'Envoyer')}
+  ${CARD('🎭 Rôles réaction',
+    (i.reactionRoles.map((r, k) => ITEM(`${/^\d+$/.test(r.key) ? '(emoji perso)' : r.key} → @${esc(rn(R, r.roleId))} <span class="mut">· #${esc(cn(C, r.channelId))} · ${r.messageId}</span>`, BTN('bot.rr.remove', '✕', { index: k }, 'r'))).join('') || '<p class="mut">Aucun.</p>') +
+    `<form data-a="bot.rr.add">${S('channelId', 'Salon du message', chO(C))}${I('messageId', 'ID du message', 'required')}<div class="row"><div>${I('emoji', 'Emoji', 'required')}</div><div>${S('roleId', 'Rôle', roO(R))}</div></div><button class="btn">Ajouter</button></form>`)}
+  ${CARD('📜 Règlement <small>bouton « Accepter » → rôle</small>',
+    (i.rules.map((r) => ITEM(`#${esc(cn(C, r.channelId))} → @${esc(rn(R, r.roleId))}`, BTN('bot.rules.remove', 'Supprimer', { id: r.id }, 'r', 'Supprimer ce règlement ?'))).join('') || '<p class="mut">Aucun règlement.</p>') +
+    `<form data-a="bot.rules">${S('channelId', 'Salon', chO(C))}${S('roleId', 'Rôle donné à l\'acceptation', roO(R))}${I('title', 'Titre', 'maxlength="100" placeholder="📜 Règlement"')}${T('content', 'Texte du règlement', 'maxlength="4000" required')}${I('label', 'Texte du bouton', 'maxlength="60" placeholder="Accepter le règlement"')}<button class="btn">Envoyer le règlement</button></form>`)}
+  ${FC('bot.ticket', '🎫 Système de tickets', S('channelId', 'Salon du panneau', chO(C)) + S('categoryId', 'Catégorie des tickets', K.map((c) => `<option value="${c.id}" ${i.tickets?.categoryId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')) +
+    S('roleId', 'Rôle staff', roO(R)) + I('title', 'Titre du panneau', 'maxlength="100" placeholder="🎫 Support ETX"'), 'Envoyer le panneau')}
+  ${FC('bot.levels', '📈 Niveaux', CK('enabled', 'Système activé', !i.levelCfg.disabled) + S('channelId', 'Salon des annonces (vide = salon du message)', chO(C, l.channelId, '—')))}
+  ${CARD('🏅 Récompenses & classement',
+    Object.entries(i.rewards).map(([lv, id]) => ITEM(`Niveau <b>${lv}</b> → @${esc(rn(R, id))}`, BTN('bot.reward.remove', '✕', { level: lv }, 'r'))).join('') +
+    `<form data-a="bot.reward.add"><div class="row"><div>${I('level', 'Niveau', 'type="number" min="1" required')}</div><div>${S('roleId', 'Rôle', roO(R))}</div></div><button class="btn">Ajouter la récompense</button></form>` +
+    `<label>Top 10</label>` + (i.top.map((u, k) => ITEM(`${k + 1}. ${esc(u.name)}`, `<span class="mut">niv. ${u.level} · ${u.total} XP</span>`)).join('') || '<p class="mut">Personne pour le moment.</p>'))}
+  ${CARD('🎉 Giveaways',
+    (i.giveaways.map((g) => ITEM(`<b>${esc(g.prize)}</b> <span class="mut">· ${g.entries} participant(s) · ${g.ended ? 'terminé' : 'fin ' + date(g.endsAt)}</span>`,
+      g.ended ? BTN('bot.gw.reroll', 'Reroll', { id: g.id }, 'w') : BTN('bot.gw.end', 'Terminer', { id: g.id }, 'r'))).join('') || '<p class="mut">Aucun.</p>') +
+    `<form data-a="bot.gw.start">${S('channelId', 'Salon', chO(C))}${I('prize', 'Lot', 'maxlength="200" required')}<div class="row"><div>${I('duration', 'Durée (30m, 2h, 1d)', 'required')}</div><div>${I('winners', 'Gagnants', 'type="number" min="1" max="20" value="1"')}</div></div><button class="btn">Lancer</button></form>`)}
+  ${CARD('📊 Sondages',
+    i.polls.map((p) => ITEM(`<b>${esc(p.question)}</b> <span class="mut">· ${p.votes} vote(s)${p.ended ? ' · terminé' : ''}</span>`, p.ended ? '' : BTN('bot.poll.end', 'Clôturer', { id: p.id }, 'r'))).join('') +
+    `<form data-a="bot.poll.create">${S('channelId', 'Salon', chO(C))}${I('question', 'Question', 'maxlength="250" required')}${T('options', '2 à 5 choix (un par ligne)', 'required')}<button class="btn">Créer</button></form>`)}
+  ${CARD('🔔 Notifications <small>Twitch · YouTube · TikTok · Twitter</small>',
+    i.notifs.map((n, k) => ITEM(`<b>${esc(n.platform)}</b> — ${esc(n.account)} → #${esc(cn(C, n.channelId))}`, BTN('bot.notif.remove', '✕', { index: k }, 'r'))).join('') +
+    `<form data-a="bot.notif.add"><div class="row"><div>${S('platform', 'Plateforme', '<option>twitch</option><option>youtube</option><option>tiktok</option><option>twitter</option>')}</div><div>${I('account', 'Compte (YouTube : ID UC…)', 'required')}</div></div>${S('channelId', 'Salon', chO(C))}${I('message', 'Message ({account} {title} {url})', 'maxlength="500"')}<button class="btn">Ajouter</button></form>`, true)}
+  </div>`;
+}
+
+function protectPage(i) {
+  const { channels: C, antiraid: a } = i;
+  return `<div class="grid">
+  ${statusCard('protect', i.status)}
+  ${CARD(`🔒 Verrouillage <small>${i.locked} salon(s) verrouillé(s)</small>`,
+    BTN('protect.lockall', 'Verrouiller tout (/alllock)', {}, 'r', 'Verrouiller TOUS les salons ?') + BTN('protect.unlockall', 'Déverrouiller tout (/unalllock)', {}, 'w', 'Déverrouiller tous les salons ?') +
+    `<form data-a="protect.lock">${S('channelId', 'Un salon précis', chO(C))}<button class="btn r" data-v="on">/lock</button><button class="btn w" data-v="off">/unlock</button></form>`)}
+  ${FC('protect.modlog', '📜 Salon de logs', S('channelId', 'Salon', chO(C, i.logChannel)))}
+  ${FC('protect.antiraid', '🛡️ Anti-raid', CK('enabled', 'Activé', a.enabled) +
+    `<div class="row"><div>${I('joinLimit', 'Joins max', `type="number" value="${a.joinLimit}"`)}</div><div>${I('joinWindow', 'Fenêtre (s)', `type="number" value="${a.joinWindow}"`)}</div><div>${S('action', 'Sanction', ['kick', 'ban', 'timeout'].map((x) => `<option ${a.action === x ? 'selected' : ''}>${x}</option>`).join(''))}</div></div>` +
+    `<div class="row"><div>${I('minAge', 'Âge min. compte (j)', `type="number" value="${a.minAge}"`)}</div><div>${I('raidMinutes', 'Durée raid (min)', `type="number" value="${a.raidMinutes}"`)}</div><div>${I('mentionLimit', 'Mentions max (0=off)', `type="number" value="${a.mentionLimit}"`)}</div></div>` +
+    CK('autoLock', 'Verrouiller les salons pendant un raid', a.autoLock) + CK('antiInvite', 'Bloquer les invitations Discord', a.antiInvite), 'Enregistrer', true)}
+  <form class="card" data-a="protect.raidmode"><h3>🚨 Raid mode ${Date.now() < a.raidUntil ? '<small style="color:var(--err)">ACTIF</small>' : ''}</h3>
+    ${I('minutes', 'Durée (minutes)', `type="number" value="${a.raidMinutes}"`)}
+    <button class="btn r" data-v="on">Activer</button><button class="btn w" data-v="off">Désactiver</button></form>
+  ${FC('protect.mod', '🔨 Modération', `<div class="row"><div>${S('type', 'Action', ['kick', 'ban', 'unban', 'timeout', 'untimeout', 'warn', 'unwarn', 'clearwarns'].map((x) => `<option>${x}</option>`).join(''))}</div><div>${I('userId', 'ID utilisateur', 'required')}</div></div>` +
+    `<div class="row"><div>${I('duration', 'Durée (timeout) / N° (unwarn)', 'placeholder="10m, 2h, 1d"')}</div><div>${I('reason', 'Raison')}</div></div>`, 'Exécuter')}
+  ${FC('protect.clear', '🧹 Supprimer des messages', S('channelId', 'Salon', chO(C)) + `<div class="row"><div>${I('count', 'Nombre (1-100)', 'type="number" min="1" max="100" value="10"')}</div><div>${I('userId', 'Seulement ce membre (ID)')}</div></div>`, 'Supprimer')}
+  ${FC('protect.slowmode', '🐌 Mode lent', S('channelId', 'Salon', chO(C)) + I('seconds', 'Secondes (0 = off)', 'type="number" min="0" max="21600" value="0"'))}
+  ${CARD('⚠️ Avertissements', i.warns.map((u) => ITEM(`<b>${esc(u.name)}</b> <span class="mut">· ${u.list.map((r, k) => `${k + 1}. ${esc(r)}`).join(' · ')}</span>`, BTN('protect.mod', 'Effacer', { type: 'clearwarns', userId: u.id }, 'r'))).join('') || '<p class="mut">Aucun avertissement.</p>')}
+  </div>`;
+}
+
+async function run(action, data, el) {
+  if (el?.dataset.confirm && !confirm(el.dataset.confirm)) return;
+  try {
+    const r = await api('/api/action', { bot: action.split('.')[0], guildId: gid, action, data });
+    toast(r.msg || '✅ Fait !');
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+document.addEventListener('submit', (e) => {
+  const f = e.target.closest('form[data-a]'); if (!f) return;
+  e.preventDefault();
+  const d = {};
+  for (const el of f.elements) {
+    if (!el.name) continue;
+    d[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  }
+  if (e.submitter?.dataset.v) d.v = e.submitter.dataset.v;
+  run(f.dataset.a, d, e.submitter);
+});
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-a]');
+  if (b) run(b.dataset.a, b.dataset.d ? JSON.parse(b.dataset.d) : {}, b);
+});
+boot();
+</script>
+</body>
+</html>
